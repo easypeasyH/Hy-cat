@@ -3,6 +3,7 @@ interface ElectronAPI {
   setIgnoreMouse: (ignore: boolean) => void;
   getConfig: () => Promise<AppConfig>;
   saveConfig: (cfg: Partial<AppConfig>) => Promise<boolean>;
+  getAppVersion: () => Promise<string>;
   getTopics: () => Promise<Topic[]>;
   createTopic: (data: { id: string; name: string }) => Promise<Topic>;
   renameTopic: (data: { id: string; name: string }) => Promise<boolean>;
@@ -10,15 +11,24 @@ interface ElectronAPI {
   reorderTopics: (orderedIds: string[]) => Promise<boolean>;
   getMessages: (topicId: string) => Promise<DBMessage[]>;
   saveMessage: (data: SaveMessageData) => Promise<DBMessage>;
-  sendToGemini: (data: GeminiRequest) => Promise<GeminiResponse>;
+  sendMessage: (data: SendMessageRequest) => Promise<AIResponse>;
+}
+
+interface ModelPreset {
+  id: string;
+  label: string;
+  provider: 'gemini' | 'openai';
+  model: string;
+  apiKey: string;
+  baseUrl?: string;
 }
 
 interface AppConfig {
-  apiKey: string;
-  modelName: string;
+  models: ModelPreset[];
+  activeModelId: string;
   petSize: number;
   petOpacity: number;
-  firstRun: boolean;
+  floorOffset: number; // 작업표시줄 위로 얼마나 띄울지 (px), 0 = 바로 붙음
 }
 
 interface Topic {
@@ -42,7 +52,7 @@ interface Attachment {
   name: string;
   type: 'image' | 'file';
   mimeType?: string;
-  data?: string; // base64 for images
+  data?: string;
   textContent?: string;
   previewUrl?: string;
   size: number;
@@ -64,17 +74,16 @@ interface SaveMessageData {
   attachments?: Attachment[];
 }
 
-interface GeminiRequest {
+interface SendMessageRequest {
   messages: ChatMessage[];
   newMessage: string;
   attachments?: Attachment[];
-  apiKey: string;
-  modelName: string;
+  model: ModelPreset;
 }
 
-interface GeminiResponse {
+interface AIResponse {
   text?: string;
-  images?: { mimeType: string; data: string }[];
+  files?: { mimeType: string; data: string }[];
   error?: string;
 }
 
@@ -85,4 +94,3 @@ declare global {
 }
 
 export {};
-

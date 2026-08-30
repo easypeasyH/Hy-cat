@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Config
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (cfg) => ipcRenderer.invoke('save-config', cfg),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
 
   // Topics
   getTopics: () => ipcRenderer.invoke('get-topics'),
@@ -19,6 +20,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getMessages: (topicId) => ipcRenderer.invoke('get-messages', topicId),
   saveMessage: (data) => ipcRenderer.invoke('save-message', data),
 
-  // Gemini
-  sendToGemini: (data) => ipcRenderer.invoke('send-to-gemini', data),
+  // AI (Gemini / OpenAI-compatible)
+  sendMessage: (data) => ipcRenderer.invoke('send-message', data),
 });

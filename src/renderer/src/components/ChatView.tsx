@@ -1,32 +1,14 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowLeft, Send, Paperclip, X, Loader2 } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback, useSyncExternalStore } from 'react';
+import { ArrowLeft, Send, Paperclip, X, Loader2, FileDown, Copy, Check } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import { chatStore, genId, type Attachment, type ChatMessage } from '../chatStore';
 
 interface Topic {
   id: string;
   name: string;
-}
-
-interface Attachment {
-  id: string;
-  name: string;
-  type: 'image' | 'file';
-  mimeType?: string;
-  data?: string;
-  textContent?: string;
-  previewUrl?: string;
-  size: number;
-}
-
-interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  attachments?: Attachment[];
-  timestamp: string;
 }
 
 interface ChatViewProps {
@@ -34,40 +16,80 @@ interface ChatViewProps {
   onBack: () => void;
 }
 
-function genId(prefix = 'msg') {
-  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-}
-
 function formatTime(iso: string) {
   return new Date(iso).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
 }
 
+// ── 코드 블록 전용: 오른쪽 위에 호버 시 나타나는 복사 버튼 ──
+const CodeBlock: React.FC<React.HTMLAttributes<HTMLPreElement>> = ({ children, ...props }) => {
+  const preRef = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    const text = preRef.current?.textContent || '';
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  return (
+    <div className="relative group/code">
+      <button
+        onClick={handleCopy}
+        className="absolute top-1.5 right-1.5 opacity-0 group-hover/code:opacity-100 transition-opacity bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-md p-1.5 z-10"
+        title="코드 복사"
+      >
+        {copied ? <Check size={12} /> : <Copy size={12} />}
+      </button>
+      <pre ref={preRef} {...props}>{children}</pre>
+    </div>
+  );
+};
+
+// ── 메시지 전체 복사 버튼 (assistant 말풍선 오른쪽 위, 호버 시 표시) ──
+const CopyMessageButton: React.FC<{ text: string }> = ({ text }) => {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+  return (
+    <button
+      onClick={handleCopy}
+      className="absolute top-1.5 right-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity bg-white/80 hover:bg-white border border-gray-200 text-gray-400 hover:text-gray-600 rounded-md p-1 shadow-sm"
+      title="메시지 복사"
+    >
+      {copied ? <Check size={12} /> : <Copy size={12} />}
+    </button>
+  );
+};
+
 const ChatView: React.FC<ChatViewProps> = ({ topic, onBack }) => {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const topicState = useSyncExternalStore(
+    chatStore.subscribe,
+    () => chatStore.getTopicSnapshot(topic.id),
+  );
+  const { messages, loading: isLoading, error } = topicState;
+
   const [inputText, setInputText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
-  const [error, setError] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const load = async () => {
-      const dbMsgs = await window.electronAPI?.getMessages(topic.id) || [];
-      const parsed: ChatMessage[] = dbMsgs.map(m => ({
-        id: m.id,
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-        attachments: JSON.parse(m.attachments || '[]'),
-        timestamp: m.created_at,
-      }));
-      setMessages(parsed);
-    };
-    load();
+    chatStore.ensureLoaded(topic.id);
+    chatStore.markSeen(topic.id);
     setIsDraggingOver(false);
   }, [topic.id]);
+
+  useEffect(() => {
+    if (!isLoading) chatStore.markSeen(topic.id);
+  }, [isLoading, topic.id]);
 
   useEffect(() => {
     return () => setIsDraggingOver(false);
@@ -166,88 +188,14 @@ const ChatView: React.FC<ChatViewProps> = ({ topic, onBack }) => {
     if (!text && attachments.length === 0) return;
     if (isLoading) return;
 
-    setError('');
-
-    const userMsg: ChatMessage = {
-      id: genId(),
-      role: 'user',
-      content: text,
-      attachments: [...attachments],
-      timestamp: new Date().toISOString(),
-    };
-
-    setMessages(prev => [...prev, userMsg]);
+    const sentAttachments = [...attachments];
     setInputText('');
     setAttachments([]);
-    setIsLoading(true);
-
-    await window.electronAPI?.saveMessage({
-      id: userMsg.id,
-      topicId: topic.id,
-      role: 'user',
-      content: text,
-      attachments: userMsg.attachments,
-    });
 
     const cfg = await window.electronAPI?.getConfig();
-    if (!cfg?.apiKey) {
-      const errMsg: ChatMessage = {
-        id: genId(),
-        role: 'assistant',
-        content: '⚠️ Gemini API Key가 설정되지 않았습니다. 설정(⚙️)에서 API Key를 입력해주세요.',
-        timestamp: new Date().toISOString(),
-      };
-      setMessages(prev => [...prev, errMsg]);
-      setIsLoading(false);
-      return;
-    }
+    const model = cfg?.models?.find(m => m.id === cfg.activeModelId);
 
-    const contextMessages = messages.slice(-20);
-
-    const response = await window.electronAPI?.sendToGemini({
-      messages: contextMessages,
-      newMessage: text || '(첨부 파일 참고)',
-      attachments: userMsg.attachments,
-      apiKey: cfg.apiKey,
-      modelName: cfg.modelName || 'gemini-3.6-flash',
-    });
-
-    const assistantContent = response?.error || response?.text || 'AI 응답을 받지 못했습니다.';
-
-    // If the model returned image parts (only image-capable models like
-    // gemini-3.1-flash-image-preview do this), turn them into attachments.
-    const assistantAttachments: Attachment[] = (response?.images || []).map(img => ({
-      id: genId('att'),
-      name: 'generated.png',
-      type: 'image',
-      mimeType: img.mimeType,
-      data: img.data,
-      previewUrl: `data:${img.mimeType};base64,${img.data}`,
-      size: 0,
-    }));
-
-    const assistantMsg: ChatMessage = {
-      id: genId(),
-      role: 'assistant',
-      content: assistantContent,
-      attachments: assistantAttachments.length > 0 ? assistantAttachments : undefined,
-      timestamp: new Date().toISOString(),
-    };
-
-    setMessages(prev => [...prev, assistantMsg]);
-    setIsLoading(false);
-
-    if (response?.error) {
-      setError(response.error);
-    }
-
-    await window.electronAPI?.saveMessage({
-      id: assistantMsg.id,
-      topicId: topic.id,
-      role: 'assistant',
-      content: assistantContent,
-      attachments: assistantAttachments,
-    });
+    chatStore.send(topic.id, model, text, sentAttachments);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -289,36 +237,58 @@ const ChatView: React.FC<ChatViewProps> = ({ topic, onBack }) => {
           </div>
         )}
 
-        {messages.map(msg => (
+        {messages.map((msg: ChatMessage) => (
           <div key={msg.id} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
             {msg.attachments && msg.attachments.length > 0 && (
               <div className="flex flex-wrap gap-1 mb-1 max-w-[85%]">
-                {msg.attachments.map(att => att.type === 'image' && att.previewUrl ? (
-                  <img
-                    key={att.id}
-                    src={att.previewUrl}
-                    alt={att.name}
-                    className="max-w-[220px] max-h-[220px] rounded-lg object-contain border border-gray-200 bg-white"
-                  />
-                ) : (
-                  <div key={att.id} className="flex items-center gap-1 px-2 py-1 bg-gray-100 rounded-lg text-xs text-gray-600">
-                    📎 {att.name}
-                  </div>
-                ))}
+                {msg.attachments.map(att => {
+                  if (att.type === 'image' && att.previewUrl) {
+                    return (
+                      <img
+                        key={att.id}
+                        src={att.previewUrl}
+                        alt={att.name}
+                        className="max-w-[220px] max-h-[220px] rounded-lg object-contain border border-gray-200 bg-white"
+                      />
+                    );
+                  }
+                  if (att.type === 'file' && att.data) {
+                    return (
+                      <a
+                        key={att.id}
+                        href={`data:${att.mimeType || 'application/octet-stream'};base64,${att.data}`}
+                        download={att.name}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-700 hover:bg-blue-100 transition-colors"
+                      >
+                        <FileDown size={13} /> {att.name}
+                      </a>
+                    );
+                  }
+                  return (
+                    <div key={att.id} className="flex items-center gap-1 px-2 py-1 bg-gray-100 rounded-lg text-xs text-gray-600">
+                      📎 {att.name}
+                    </div>
+                  );
+                })}
               </div>
             )}
 
             {msg.content && (
               <div
-                className={`max-w-[85%] px-3 py-2 rounded-2xl text-sm leading-relaxed ${
+                className={`relative group/msg max-w-[85%] px-3 py-2 rounded-2xl text-sm leading-relaxed ${
                   msg.role === 'user'
                     ? 'bg-blue-500 text-white rounded-br-sm'
                     : 'bg-white border border-gray-200 text-gray-800 rounded-bl-sm shadow-sm'
                 }`}
               >
+                {msg.role === 'assistant' && <CopyMessageButton text={msg.content} />}
                 {msg.role === 'assistant' ? (
-                  <div className="prose prose-sm max-w-none prose-code:text-xs prose-pre:bg-gray-800 prose-pre:text-gray-100 selectable-text">
-                    <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+                  <div className="prose prose-sm max-w-none prose-code:text-xs prose-pre:bg-gray-800 prose-pre:text-gray-100 selectable-text pr-5">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm, remarkMath]}
+                      rehypePlugins={[rehypeKatex]}
+                      components={{ pre: CodeBlock }}
+                    >
                       {msg.content}
                     </ReactMarkdown>
                   </div>
@@ -409,10 +379,10 @@ const ChatView: React.FC<ChatViewProps> = ({ topic, onBack }) => {
             <Send size={14} />
           </button>
         </div>
-        <p className="text-xs text-gray-400 mt-1 text-center">Ctrl+V로 클립보드 이미지 첨부 가능</p>
+        <p className="text-xs text-gray-400 mt-1 text-center">Ctrl+V로 클립보드 이미지 첨부 가능 · 채팅창을 닫아도 AI는 계속 응답을 생성합니다</p>
       </div>
     </div>
   );
 };
 
-export default ChatView;
+export default React.memo(ChatView);
