@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Plus, MoreVertical, X, Check, Trash2, Edit2, GripVertical } from 'lucide-react';
 import appIcon from '../assets/app-icon.png';
+import { chatStore } from '../chatStore';
 
 interface Topic {
   id: string;
@@ -63,6 +64,9 @@ const TopicList: React.FC<TopicListProps> = ({ onSelectTopic }) => {
 
   const handleDelete = async (id: string) => {
     await window.electronAPI?.deleteTopic(id);
+    // 아직 AI 응답이 진행 중이던 토픽이었다면 chatStore에서도 완전히 지워서,
+    // 나중에 응답이 도착해도 "!" 표시가 되살아나지 않게 한다.
+    chatStore.discard(id);
     setTopics(prev => prev.filter(t => t.id !== id));
     setDeleteConfirmId(null);
     setMenuTopicId(null);
