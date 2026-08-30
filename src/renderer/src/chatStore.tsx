@@ -61,6 +61,9 @@ function mimeToExt(mimeType: string): string {
 
 class ChatStore {
   private topics = new Map<string, TopicChatState>();
+  // 삭제된 토픽의 id. 백그라운드에서 돌던 send()가 나중에 끝나도 여기 있으면
+  // 상태를 되살리지 않는다 (그렇지 않으면 "!" 표시를 지울 방법이 없는 유령 토픽이 생김).
+  private discarded = new Set<string>();
   private listeners = new Set<() => void>();
   private indicatorSnapshot = { loading: false, unseen: false };
 
@@ -89,20 +92,32 @@ class ChatStore {
     return s;
   }
 
+  // 상태를 항상 "새 객체"로 교체한다. useSyncExternalStore는 getSnapshot()이 돌려주는
+  // 참조가 바뀌어야만 리렌더링하므로, 기존 객체를 직접 mutate하면 실제로 값이 바뀌어도
+  // 화면이 갱신되지 않는다 (채팅방을 나갔다 들어와야만 보이던 버그의 원인).
+  private patch(topicId: string, partial: Partial<TopicChatState>): TopicChatState {
+    const next = { ...this.ensure(topicId), ...partial };
+    this.topics.set(topicId, next);
+    return next;
+  }
+
   getTopicSnapshot = (topicId: string) => this.ensure(topicId);
 
   async ensureLoaded(topicId: string) {
     const s = this.ensure(topicId);
     if (s.loaded) return;
     const dbMsgs = (await window.electronAPI?.getMessages(topicId)) || [];
-    s.messages = dbMsgs.map(m => ({
-      id: m.id,
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-      attachments: JSON.parse(m.attachments || '[]'),
-      timestamp: m.created_at,
-    }));
-    s.loaded = true;
+    if (this.discarded.has(topicId)) return;
+    this.patch(topicId, {
+      messages: dbMsgs.map(m => ({
+        id: m.id,
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+        attachments: JSON.parse(m.attachments || '[]'),
+        timestamp: m.created_at,
+      })),
+      loaded: true,
+    });
     this.notify();
   }
 
@@ -110,13 +125,22 @@ class ChatStore {
   markSeen(topicId: string) {
     const s = this.ensure(topicId);
     if (s.completedUnseen) {
-      s.completedUnseen = false;
+      this.patch(topicId, { completedUnseen: false });
+      this.notify();
+    }
+  }
+
+  // 토픽 삭제 시 호출: 이 토픽의 상태를 완전히 지우고, 이후 send()가 끝나도
+  // 되살아나지 않도록 표시해둔다. (버그 2 수정)
+  discard(topicId: string) {
+    this.discarded.add(topicId);
+    if (this.topics.delete(topicId)) {
       this.notify();
     }
   }
 
   async send(topicId: string, model: ModelPreset | undefined, text: string, attachments: Attachment[]) {
-    const s = this.ensure(topicId);
+    if (this.discarded.has(topicId)) return;
 
     const userMsg: ChatMessage = {
       id: genId('msg'),
@@ -125,9 +149,11 @@ class ChatStore {
       attachments,
       timestamp: new Date().toISOString(),
     };
-    s.messages = [...s.messages, userMsg];
-    s.loading = true;
-    s.error = '';
+    const afterUser = this.patch(topicId, {
+      messages: [...this.ensure(topicId).messages, userMsg],
+      loading: true,
+      error: '',
+    });
     this.notify();
 
     await window.electronAPI?.saveMessage({
@@ -138,6 +164,8 @@ class ChatStore {
       attachments,
     });
 
+    if (this.discarded.has(topicId)) return;
+
     if (!model) {
       this.finishWithError(topicId, '⚠️ 사용할 AI 모델이 설정되지 않았습니다. 설정에서 모델을 추가/선택해주세요.');
       return;
@@ -147,7 +175,7 @@ class ChatStore {
       return;
     }
 
-    const context = s.messages.slice(-20);
+    const context = afterUser.messages.slice(-20);
     let response: { text?: string; files?: { mimeType: string; data: string }[]; error?: string } | undefined;
     try {
       response = await window.electronAPI?.sendMessage({
@@ -159,6 +187,8 @@ class ChatStore {
     } catch (e) {
       response = { error: 'AI 응답을 가져오지 못했습니다.' };
     }
+
+    if (this.discarded.has(topicId)) return;
 
     const assistantContent = response?.error || response?.text || 'AI 응답을 받지 못했습니다.';
 
@@ -186,10 +216,12 @@ class ChatStore {
       timestamp: new Date().toISOString(),
     };
 
-    s.messages = [...s.messages, assistantMsg];
-    s.loading = false;
-    s.error = response?.error || '';
-    s.completedUnseen = true;
+    this.patch(topicId, {
+      messages: [...this.ensure(topicId).messages, assistantMsg],
+      loading: false,
+      error: response?.error || '',
+      completedUnseen: true,
+    });
     this.notify();
 
     await window.electronAPI?.saveMessage({
@@ -202,16 +234,18 @@ class ChatStore {
   }
 
   private finishWithError(topicId: string, message: string) {
-    const s = this.ensure(topicId);
+    if (this.discarded.has(topicId)) return;
     const errMsg: ChatMessage = {
       id: genId('msg'),
       role: 'assistant',
       content: message,
       timestamp: new Date().toISOString(),
     };
-    s.messages = [...s.messages, errMsg];
-    s.loading = false;
-    s.completedUnseen = true;
+    this.patch(topicId, {
+      messages: [...this.ensure(topicId).messages, errMsg],
+      loading: false,
+      completedUnseen: true,
+    });
     this.notify();
   }
 }
