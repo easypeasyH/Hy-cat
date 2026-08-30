@@ -1,5 +1,5 @@
-import React, { useState, useRef } from 'react';
-import { X, Settings, ChevronLeft } from 'lucide-react';
+import React, { useState, useRef, useCallback } from 'react';
+import { X, Settings, ChevronLeft, Maximize2, Minimize2 } from 'lucide-react';
 import TopicList from './components/TopicList';
 import ChatView from './components/ChatView';
 import SettingsPanel from './components/SettingsPanel';
@@ -33,9 +33,27 @@ const Bubble: React.FC<BubbleProps> = ({
   onRequestMouseCatch,
 }) => {
   const [size, setSize] = useState({ width: 360, height: 480 });
+  const [isMaximized, setIsMaximized] = useState(false);
+  const preMaxSizeRef = useRef({ width: 360, height: 480 });
   const [selectedTopic, setSelectedTopic] = useState<Topic | null>(null);
   const [view, setView] = useState<BubbleView>('topics');
   const isInteractingRef = useRef(false);
+
+  // ⚠️ 모든 hook은 early return(아래 `if (!isVisible) return null;`)보다 반드시 먼저 와야 합니다.
+  const handleSelectTopic = useCallback((topic: Topic) => {
+    setSelectedTopic(topic);
+    setView('chat');
+  }, []);
+
+  const handleBack = useCallback(() => {
+    setView('topics');
+    setSelectedTopic(null);
+  }, []);
+
+  const handleOpenSettings = useCallback(() => setView('settings'), []);
+  const handleCloseSettings = useCallback(() => {
+    setView(prev => (prev === 'settings' ? (selectedTopic ? 'chat' : 'topics') : prev));
+  }, [selectedTopic]);
 
   const margin = 8;
   const gap = 16;
@@ -64,6 +82,17 @@ const Bubble: React.FC<BubbleProps> = ({
     if (!isInteractingRef.current) onRequestMouseCatch(false);
   };
 
+  const handleToggleMaximize = () => {
+    if (isMaximized) {
+      setSize(preMaxSizeRef.current);
+      setIsMaximized(false);
+    } else {
+      preMaxSizeRef.current = size;
+      setSize({ width: viewportWidth - margin * 2, height: viewportHeight - margin * 2 });
+      setIsMaximized(true);
+    }
+  };
+
   type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
   const resizeDragRef = useRef({
     isDragging: false,
@@ -82,6 +111,7 @@ const Bubble: React.FC<BubbleProps> = ({
     e.preventDefault();
     isInteractingRef.current = true;
     onRequestMouseCatch(true);
+    if (isMaximized) setIsMaximized(false);
     resizeDragRef.current = {
       isDragging: true,
       edge,
@@ -132,29 +162,13 @@ const Bubble: React.FC<BubbleProps> = ({
   const petCenterX = petPosition.x + petSize / 2;
   const tailX = Math.max(16, Math.min(petCenterX - left - 8, effWidth - 32));
 
-  const handleSelectTopic = (topic: Topic) => {
-    setSelectedTopic(topic);
-    setView('chat');
-  };
-
-  const handleBack = () => {
-    setView('topics');
-    setSelectedTopic(null);
-  };
-
-  const handleOpenSettings = () => setView('settings');
-  const handleCloseSettings = () => setView(selectedTopic ? 'chat' : 'topics');
-
   return (
-    // Outer, non-clipped positioning layer — resize handles live here so rounded-corner
-    // clipping on the inner visual box can never eat into their hit area.
     <div
       className="absolute pointer-events-auto"
       style={{ width: effWidth, height: effHeight, left, top, zIndex: 40 }}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
-      {/* Inner, visually-clipped box */}
       <div className="w-full h-full bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col overflow-hidden">
         {view !== 'settings' && (
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 bg-white flex-shrink-0">
@@ -170,6 +184,13 @@ const Bubble: React.FC<BubbleProps> = ({
               </span>
             </div>
             <div className="flex items-center gap-1">
+              <button
+                onClick={handleToggleMaximize}
+                className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 transition-colors"
+                title={isMaximized ? '원래 크기로' : '최대화'}
+              >
+                {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+              </button>
               <button
                 onClick={handleOpenSettings}
                 className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 transition-colors"
@@ -193,8 +214,6 @@ const Bubble: React.FC<BubbleProps> = ({
         </div>
       </div>
 
-      {/* Resize handles — deliberately OUTSIDE the clipped box above, and poke out
-          ~4px past the visible edge so the hit target is generous and never clipped. */}
       <div className="absolute -top-1 left-0 right-0 h-3 cursor-ns-resize z-30" onMouseDown={handleResizeStart('n')} title="드래그해서 크기 조절" />
       <div className="absolute -bottom-1 left-0 right-0 h-3 cursor-ns-resize z-30" onMouseDown={handleResizeStart('s')} title="드래그해서 크기 조절" />
       <div className="absolute -left-1 top-0 bottom-0 w-3 cursor-ew-resize z-30" onMouseDown={handleResizeStart('w')} title="드래그해서 크기 조절" />
@@ -212,7 +231,6 @@ const Bubble: React.FC<BubbleProps> = ({
         </svg>
       </div>
 
-      {/* Tail */}
       <div
         className={
           placedBelow

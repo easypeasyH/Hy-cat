@@ -17,7 +17,7 @@ function generateId() {
   return 'topic_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
 }
 
-const MAX_VISIBLE = 5;
+type DropIndicator = { index: number; edge: 'top' | 'bottom' } | null;
 
 const TopicList: React.FC<TopicListProps> = ({ onSelectTopic }) => {
   const [topics, setTopics] = useState<Topic[]>([]);
@@ -28,7 +28,7 @@ const TopicList: React.FC<TopicListProps> = ({ onSelectTopic }) => {
   const [renameValue, setRenameValue] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [error, setError] = useState('');
-  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<DropIndicator>(null);
   const dragIdRef = useRef<string | null>(null);
 
   const loadTopics = async () => {
@@ -68,34 +68,46 @@ const TopicList: React.FC<TopicListProps> = ({ onSelectTopic }) => {
     setMenuTopicId(null);
   };
 
-  // ── Drag-to-reorder (only within the visible top-5 slice) ──
+  // ── Drag-to-reorder: shows a thin insertion line BETWEEN items instead of
+  // highlighting the whole target row, so it's unambiguous where the item will land. ──
   const handleDragStart = (id: string) => (e: React.DragEvent) => {
     dragIdRef.current = id;
     e.dataTransfer.effectAllowed = 'move';
   };
 
-  const handleDragOver = (id: string) => (e: React.DragEvent) => {
+  const handleDragOverRow = (index: number) => (e: React.DragEvent) => {
     e.preventDefault();
-    if (id !== dragIdRef.current) setDragOverId(id);
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const isTopHalf = e.clientY < rect.top + rect.height / 2;
+    setDropIndicator({ index, edge: isTopHalf ? 'top' : 'bottom' });
   };
 
-  const handleDragLeave = () => setDragOverId(null);
+  const handleDragLeaveList = (e: React.DragEvent) => {
+    // Only clear if we actually left the whole list container (not just moving between rows)
+    if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) {
+      setDropIndicator(null);
+    }
+  };
 
-  const handleDropOn = (targetId: string) => async (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOverId(null);
+  const commitDrop = () => {
     const draggedId = dragIdRef.current;
     dragIdRef.current = null;
-    if (!draggedId || draggedId === targetId) return;
+    const indicator = dropIndicator;
+    setDropIndicator(null);
+    if (!draggedId || !indicator) return;
 
     setTopics(prev => {
       const next = [...prev];
       const fromIdx = next.findIndex(t => t.id === draggedId);
-      const toIdx = next.findIndex(t => t.id === targetId);
-      if (fromIdx === -1 || toIdx === -1) return prev;
+      if (fromIdx === -1) return prev;
       const [moved] = next.splice(fromIdx, 1);
-      next.splice(toIdx, 0, moved);
-      // Persist the new order for the whole list (not just the visible slice)
+
+      let insertAt = indicator.index;
+      if (fromIdx < indicator.index) insertAt -= 1;
+      if (indicator.edge === 'bottom') insertAt += 1;
+      insertAt = Math.max(0, Math.min(insertAt, next.length));
+
+      next.splice(insertAt, 0, moved);
       window.electronAPI?.reorderTopics(next.map(t => t.id));
       return next;
     });
@@ -103,11 +115,12 @@ const TopicList: React.FC<TopicListProps> = ({ onSelectTopic }) => {
 
   const handleDragEnd = () => {
     dragIdRef.current = null;
-    setDragOverId(null);
+    setDropIndicator(null);
   };
 
-  const visibleTopics = topics.slice(0, MAX_VISIBLE);
   const isDragDisabled = (id: string) => renamingId === id || deleteConfirmId === id || menuTopicId === id;
+
+  const InsertLine = () => <div className="h-0.5 my-1 mx-2 bg-blue-400 rounded-full" />;
 
   return (
     <div className="flex flex-col h-full">
@@ -116,11 +129,15 @@ const TopicList: React.FC<TopicListProps> = ({ onSelectTopic }) => {
           <img src={appIcon} alt="" className="w-6 h-6 rounded-full object-cover" />
           Chat Topic
         </h2>
-        <p className="text-xs text-gray-400 mt-0.5">토픽을 선택하거나 새로 만드세요!</p>
+        <p className="text-xs text-gray-400 mt-0.5">토픽을 선택하거나 새로 만드세요! 드래그로 순서 변경</p>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-2">
-        {visibleTopics.length === 0 && !isCreating && (
+      <div
+        className="flex-1 overflow-y-auto p-3 space-y-2"
+        onDragLeave={handleDragLeaveList}
+        onDrop={e => { e.preventDefault(); commitDrop(); }}
+      >
+        {topics.length === 0 && !isCreating && (
           <div className="text-center py-10 text-gray-400 text-sm">
             <p className="text-3xl mb-2">💬</p>
             <p>아직 대화 주제가 없어요.</p>
@@ -128,89 +145,87 @@ const TopicList: React.FC<TopicListProps> = ({ onSelectTopic }) => {
           </div>
         )}
 
-        {visibleTopics.map(topic => (
-          <div
-            key={topic.id}
-            className={`relative ${dragOverId === topic.id ? 'ring-2 ring-blue-300 rounded-xl' : ''}`}
-            draggable={!isDragDisabled(topic.id)}
-            onDragStart={handleDragStart(topic.id)}
-            onDragOver={handleDragOver(topic.id)}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDropOn(topic.id)}
-            onDragEnd={handleDragEnd}
-          >
-            {renamingId === topic.id ? (
-              <div className="flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded-xl">
-                <input
-                  autoFocus
-                  value={renameValue}
-                  onChange={e => setRenameValue(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') handleRename(topic.id); if (e.key === 'Escape') setRenamingId(null); }}
-                  className="flex-1 px-2 py-1 text-sm border border-blue-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
-                />
-                <button onClick={() => handleRename(topic.id)} className="text-green-500 hover:text-green-700"><Check size={16} /></button>
-                <button onClick={() => setRenamingId(null)} className="text-gray-400 hover:text-gray-600"><X size={16} /></button>
-              </div>
-            ) : deleteConfirmId === topic.id ? (
-              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-sm">
-                <p className="text-red-700 font-medium mb-2">"{topic.name}"을 삭제할까요?</p>
-                <p className="text-red-400 text-xs mb-3">대화 내용도 함께 삭제됩니다.</p>
-                <div className="flex gap-2">
-                  <button onClick={() => setDeleteConfirmId(null)} className="flex-1 py-1.5 rounded-lg border border-gray-300 text-gray-600 text-xs hover:bg-gray-50">취소</button>
-                  <button onClick={() => handleDelete(topic.id)} className="flex-1 py-1.5 rounded-lg bg-red-500 text-white text-xs hover:bg-red-600">삭제</button>
+        {topics.map((topic, index) => (
+          <React.Fragment key={topic.id}>
+            {dropIndicator?.index === index && dropIndicator.edge === 'top' && <InsertLine />}
+
+            <div
+              className="relative"
+              draggable={!isDragDisabled(topic.id)}
+              onDragStart={handleDragStart(topic.id)}
+              onDragOver={handleDragOverRow(index)}
+            >
+              {renamingId === topic.id ? (
+                <div className="flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded-xl">
+                  <input
+                    autoFocus
+                    value={renameValue}
+                    onChange={e => setRenameValue(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleRename(topic.id); if (e.key === 'Escape') setRenamingId(null); }}
+                    className="flex-1 px-2 py-1 text-sm border border-blue-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
+                  />
+                  <button onClick={() => handleRename(topic.id)} className="text-green-500 hover:text-green-700"><Check size={16} /></button>
+                  <button onClick={() => setRenamingId(null)} className="text-gray-400 hover:text-gray-600"><X size={16} /></button>
                 </div>
-              </div>
-            ) : (
-              <div
-                className="flex items-center justify-between p-3 bg-white hover:bg-blue-50 border border-gray-100 hover:border-blue-200 rounded-xl cursor-pointer transition-all group"
-                onClick={() => onSelectTopic(topic)}
-              >
-                <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                  <span
-                    className="text-gray-300 cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-                    onClick={e => e.stopPropagation()}
-                    title="드래그해서 순서 변경"
-                  >
-                    <GripVertical size={14} />
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-gray-800 truncate">{topic.name}</p>
-                    <p className="text-xs text-gray-400 mt-0.5">
-                      {new Date(topic.updated_at).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                    </p>
+              ) : deleteConfirmId === topic.id ? (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-sm">
+                  <p className="text-red-700 font-medium mb-2">"{topic.name}"을 삭제할까요?</p>
+                  <p className="text-red-400 text-xs mb-3">대화 내용도 함께 삭제됩니다.</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => setDeleteConfirmId(null)} className="flex-1 py-1.5 rounded-lg border border-gray-300 text-gray-600 text-xs hover:bg-gray-50">취소</button>
+                    <button onClick={() => handleDelete(topic.id)} className="flex-1 py-1.5 rounded-lg bg-red-500 text-white text-xs hover:bg-red-600">삭제</button>
                   </div>
                 </div>
-                <button
-                  onClick={e => { e.stopPropagation(); setMenuTopicId(menuTopicId === topic.id ? null : topic.id); }}
-                  className="ml-2 w-7 h-7 flex items-center justify-center rounded-full opacity-0 group-hover:opacity-100 hover:bg-gray-200 text-gray-400 transition-all"
+              ) : (
+                <div
+                  className="flex items-center justify-between p-3 bg-white hover:bg-blue-50 border border-gray-100 hover:border-blue-200 rounded-xl cursor-pointer transition-all group"
+                  onClick={() => onSelectTopic(topic)}
                 >
-                  <MoreVertical size={14} />
-                </button>
-              </div>
-            )}
+                  <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                    <span
+                      className="text-gray-300 cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                      onClick={e => e.stopPropagation()}
+                      title="드래그해서 순서 변경"
+                    >
+                      <GripVertical size={14} />
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-gray-800 truncate">{topic.name}</p>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        {new Date(topic.updated_at).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={e => { e.stopPropagation(); setMenuTopicId(menuTopicId === topic.id ? null : topic.id); }}
+                    className="ml-2 w-7 h-7 flex items-center justify-center rounded-full opacity-0 group-hover:opacity-100 hover:bg-gray-200 text-gray-400 transition-all"
+                  >
+                    <MoreVertical size={14} />
+                  </button>
+                </div>
+              )}
 
-            {menuTopicId === topic.id && renamingId !== topic.id && deleteConfirmId !== topic.id && (
-              <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-xl z-50 overflow-hidden min-w-[140px]">
-                <button
-                  onClick={() => { setRenamingId(topic.id); setRenameValue(topic.name); setMenuTopicId(null); }}
-                  className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50"
-                >
-                  <Edit2 size={14} /> 이름 변경
-                </button>
-                <button
-                  onClick={() => { setDeleteConfirmId(topic.id); setMenuTopicId(null); }}
-                  className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-red-500 hover:bg-red-50"
-                >
-                  <Trash2 size={14} /> 삭제
-                </button>
-              </div>
-            )}
-          </div>
+              {menuTopicId === topic.id && renamingId !== topic.id && deleteConfirmId !== topic.id && (
+                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-xl z-50 overflow-hidden min-w-[140px]">
+                  <button
+                    onClick={() => { setRenamingId(topic.id); setRenameValue(topic.name); setMenuTopicId(null); }}
+                    className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    <Edit2 size={14} /> 이름 변경
+                  </button>
+                  <button
+                    onClick={() => { setDeleteConfirmId(topic.id); setMenuTopicId(null); }}
+                    className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-red-500 hover:bg-red-50"
+                  >
+                    <Trash2 size={14} /> 삭제
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {dropIndicator?.index === index && dropIndicator.edge === 'bottom' && <InsertLine />}
+          </React.Fragment>
         ))}
-
-        {topics.length > MAX_VISIBLE && (
-          <p className="text-center text-xs text-gray-400 py-1">+ {topics.length - MAX_VISIBLE}개 더 있음</p>
-        )}
 
         {isCreating && (
           <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl space-y-2">
@@ -243,4 +258,4 @@ const TopicList: React.FC<TopicListProps> = ({ onSelectTopic }) => {
   );
 };
 
-export default TopicList;
+export default React.memo(TopicList);

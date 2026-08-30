@@ -1,33 +1,23 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useSyncExternalStore } from 'react';
+import { Loader2 } from 'lucide-react';
 import Bubble from './Bubble';
+import { chatStore } from './chatStore';
 import idleImg from './assets/pet/idle.png';
 import sleepingImg from './assets/pet/sleeping.png';
 import fallingImg from './assets/pet/falling.png';
+import hoverGif from './assets/pet/hover.gif';
 
 type PetState = 'PET_IDLE_MOVING' | 'PET_DRAGGING' | 'PET_FALLING' | 'PET_IDLE_STOPPED';
 
-interface AppConfig {
-  apiKey: string;
-  modelName: string;
-  petSize: number;
-  petOpacity: number;
-}
-
-const DEFAULT_CONFIG: AppConfig = {
-  apiKey: '',
-  modelName: 'gemini-3.6-flash',
-  petSize: 96,
-  petOpacity: 1.0,
-};
-
 const App = () => {
-  const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
+  const [config, setConfig] = useState<AppConfig | null>(null);
   const [petState, setPetState] = useState<PetState>('PET_IDLE_MOVING');
   const [position, setPosition] = useState({
     x: window.innerWidth - 160,
     y: window.innerHeight - 160,
   });
   const [showBubble, setShowBubble] = useState(false);
+  const [isHovering, setIsHovering] = useState(false);
   const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight });
 
   const positionRef = useRef(position);
@@ -37,11 +27,20 @@ const App = () => {
   const velocityYRef = useRef(0);
   const bubbleOpenRef = useRef(false);
   const mouseCatchRef = useRef(false);
+  const lastMouseRef = useRef({ x: -9999, y: -9999 });
+
+  const indicator = useSyncExternalStore(chatStore.subscribe, chatStore.getIndicatorSnapshot);
 
   useEffect(() => { positionRef.current = position; }, [position]);
   useEffect(() => { stateRef.current = petState; }, [petState]);
   useEffect(() => { configRef.current = config; }, [config]);
   useEffect(() => { bubbleOpenRef.current = showBubble; }, [showBubble]);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => { lastMouseRef.current = { x: e.clientX, y: e.clientY }; };
+    window.addEventListener('mousemove', onMove);
+    return () => window.removeEventListener('mousemove', onMove);
+  }, []);
 
   useEffect(() => {
     const onResize = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
@@ -83,8 +82,9 @@ const App = () => {
 
       const state = stateRef.current;
       const pos = { ...positionRef.current };
-      const size = configRef.current.petSize;
-      const groundY = window.innerHeight - size - 40;
+      const size = configRef.current?.petSize || 96;
+      const floorOffset = configRef.current?.floorOffset ?? 0;
+      const groundY = window.innerHeight - size - floorOffset;
 
       if (state === 'PET_FALLING') {
         velocityYRef.current += 900 * dt;
@@ -104,8 +104,8 @@ const App = () => {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  const handleMouseEnter = () => setMouseCatch(true);
-  const handleMouseLeave = () => setMouseCatch(false);
+  const handleMouseEnter = () => { setMouseCatch(true); setIsHovering(true); };
+  const handleMouseLeave = () => { setMouseCatch(false); setIsHovering(false); };
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
@@ -120,11 +120,12 @@ const App = () => {
     };
 
     const onMove = (ev: MouseEvent) => {
-      const size = configRef.current.petSize;
+      const size = configRef.current?.petSize || 96;
+      const floorOffset = configRef.current?.floorOffset ?? 0;
       let nx = dragRef.current.initialX + (ev.clientX - dragRef.current.startX);
       let ny = dragRef.current.initialY + (ev.clientY - dragRef.current.startY);
       nx = Math.max(0, Math.min(nx, window.innerWidth - size));
-      ny = Math.max(0, Math.min(ny, window.innerHeight - size));
+      ny = Math.max(0, Math.min(ny, window.innerHeight - size - floorOffset));
       setPosition({ x: nx, y: ny });
       setMouseCatch(true);
     };
@@ -151,22 +152,30 @@ const App = () => {
     }
   };
 
-  const closeBubble = () => {
+  const closeBubble = useCallback(() => {
     setShowBubble(false);
     setPetState('PET_IDLE_MOVING');
-    setMouseCatch(false);
-  };
+    const { x, y } = lastMouseRef.current;
+    const pos = positionRef.current;
+    const size = configRef.current?.petSize || 96;
+    const overPet = x >= pos.x && x <= pos.x + size && y >= pos.y && y <= pos.y + size;
+    setMouseCatch(overPet);
+  }, []);
 
+  if (!config) return null;
   const { petSize, petOpacity } = config;
 
-  // Pick the sprite for the current state.
-  // PET_IDLE_MOVING and PET_DRAGGING both use the default "idle" image —
-  // add more imports above + branches here if you want dedicated sprites for those too.
+  const HOVER_SCALE = 1.2;
+
   const petImage = (() => {
     if (petState === 'PET_IDLE_STOPPED') return sleepingImg;
     if (petState === 'PET_FALLING') return fallingImg;
     return idleImg;
   })();
+
+  const showHoverGif = isHovering && petState === 'PET_IDLE_MOVING';
+
+  const showIndicator = !showBubble && (indicator.loading || indicator.unseen);
 
   return (
     <div className="w-full h-full relative pointer-events-none overflow-hidden">
@@ -196,14 +205,42 @@ const App = () => {
         onMouseDown={handleMouseDown}
         onContextMenu={handleContextMenu}
       >
-        <div className="w-full h-full flex items-center justify-center overflow-hidden">
-          <img
-            src={petImage}
-            alt="cat"
-            className="w-full h-full object-contain pointer-events-none"
-          />
-        </div>
-        {petState !== 'PET_IDLE_STOPPED' && (
+        {showIndicator && (
+          <div
+            className="absolute -top-9 left-1/2 -translate-x-1/2 w-7 h-7 bg-white rounded-full shadow-lg border border-gray-200 flex items-center justify-center"
+            style={{ zIndex: 60 }}
+          >
+            {indicator.loading ? (
+              <Loader2 size={14} className="animate-spin text-blue-400" />
+            ) : (
+              <span className="text-blue-500 font-bold text-sm leading-none">!</span>
+            )}
+          </div>
+        )}
+
+        {showHoverGif ? (
+          <div
+            className="absolute pointer-events-none"
+            style={{
+              width: petSize * HOVER_SCALE,
+              height: petSize * HOVER_SCALE,
+              left: '50%',
+              top: '50%',
+              transform: 'translate(-50%, -50%)',
+            }}
+          >
+            <img src={hoverGif} alt="cat" className="w-full h-full object-contain" />
+          </div>
+        ) : (
+          <div className="w-full h-full flex items-center justify-center overflow-hidden">
+            <img
+              src={petImage}
+              alt="cat"
+              className="w-full h-full object-contain pointer-events-none"
+            />
+          </div>
+        )}
+        {petState !== 'PET_IDLE_STOPPED' && !showIndicator && (
           <div className="absolute -top-7 left-1/2 -translate-x-1/2 opacity-0 hover:opacity-100 transition-opacity bg-black/60 text-white text-xs px-2 py-0.5 rounded-full whitespace-nowrap pointer-events-none">
             우클릭으로 채팅 열기
           </div>
